@@ -15,6 +15,26 @@ jobs:
           distribution: temurin
           java-version: 17
 
+      # Face-recognition model (small TFLite file). Tries each source until one works.
+      - name: Download face model
+        run: |
+          mkdir -p app/src/main/assets
+          OUT=app/src/main/assets/face_model.tflite
+          for url in \
+            "https://github.com/shubham0204/FaceRecognition_With_FaceNet_Android/raw/main/app/src/main/assets/facenet.tflite" \
+            "https://github.com/shubham0204/FaceRecognition_With_FaceNet_Android/raw/master/app/src/main/assets/facenet.tflite" \
+            "https://github.com/estebanuri/face_recognition/raw/master/android/app/src/main/assets/mobile_face_net.tflite"
+          do
+            echo "Trying $url"
+            rm -f "$OUT"
+            if curl -fL --retry 2 -o "$OUT" "$url" && [ "$(stat -c%s "$OUT")" -gt 1000000 ]; then
+              echo "Got model: $(stat -c%s "$OUT") bytes"
+              exit 0
+            fi
+          done
+          echo "Could not download a face model from any source"
+          exit 1
+
       # The runner image already includes the Android SDK; just accept licenses
       - name: Accept Android licenses
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true

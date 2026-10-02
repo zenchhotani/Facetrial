@@ -9,7 +9,7 @@ import android.util.AttributeSet
 import android.view.View
 import kotlin.math.max
 
-/** Draws face boxes on top of the camera preview. */
+/** Draws face boxes (and a name label on one of them) on top of the camera preview. */
 class FaceOverlay @JvmOverloads constructor(
     context: Context,
     attrs: AttributeSet? = null
@@ -19,18 +19,38 @@ class FaceOverlay @JvmOverloads constructor(
     private var imageWidth = 1
     private var imageHeight = 1
     private var mirror = false
+    private var labelIndex = -1
+    private var label: String? = null
 
-    private val paint = Paint().apply {
+    private val boxPaint = Paint().apply {
         color = Color.GREEN
         style = Paint.Style.STROKE
         strokeWidth = 6f
     }
+    private val textPaint = Paint().apply {
+        color = Color.WHITE
+        textSize = 46f
+        isAntiAlias = true
+    }
+    private val textBg = Paint().apply {
+        color = Color.parseColor("#AA000000")
+        style = Paint.Style.FILL
+    }
 
-    fun update(faces: List<Rect>, imageWidth: Int, imageHeight: Int, mirror: Boolean) {
+    fun update(
+        faces: List<Rect>,
+        imageWidth: Int,
+        imageHeight: Int,
+        mirror: Boolean,
+        labelIndex: Int = -1,
+        label: String? = null
+    ) {
         this.faces = faces
         this.imageWidth = imageWidth
         this.imageHeight = imageHeight
         this.mirror = mirror
+        this.labelIndex = labelIndex
+        this.label = label
         postInvalidate()
     }
 
@@ -43,7 +63,7 @@ class FaceOverlay @JvmOverloads constructor(
         val offsetX = (width - imageWidth * scale) / 2f
         val offsetY = (height - imageHeight * scale) / 2f
 
-        for (r in faces) {
+        faces.forEachIndexed { index, r ->
             var left = r.left.toFloat()
             var right = r.right.toFloat()
             if (mirror) {
@@ -52,13 +72,19 @@ class FaceOverlay @JvmOverloads constructor(
                 left = l
                 right = rr
             }
-            canvas.drawRect(
-                left * scale + offsetX,
-                r.top * scale + offsetY,
-                right * scale + offsetX,
-                r.bottom * scale + offsetY,
-                paint
-            )
+            val l = left * scale + offsetX
+            val t = r.top * scale + offsetY
+            val rt = right * scale + offsetX
+            val b = r.bottom * scale + offsetY
+            canvas.drawRect(l, t, rt, b, boxPaint)
+
+            val text = label
+            if (index == labelIndex && !text.isNullOrBlank()) {
+                val w = textPaint.measureText(text)
+                val top = (t - 62f).coerceAtLeast(0f)
+                canvas.drawRect(l, top, l + w + 24f, top + 58f, textBg)
+                canvas.drawText(text, l + 12f, top + 44f, textPaint)
+            }
         }
     }
 }

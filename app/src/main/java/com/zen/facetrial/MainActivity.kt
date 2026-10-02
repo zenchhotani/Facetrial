@@ -3,7 +3,11 @@ package com.zen.facetrial
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.Matrix
+import android.graphics.Rect
 import android.os.Bundle
+import android.os.SystemClock
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -23,11 +27,22 @@ import androidx.core.content.ContextCompat
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.face.FaceDetection
 import com.google.mlkit.vision.face.FaceDetectorOptions
+import java.util.Collections
 import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import kotlin.math.max
+import kotlin.math.min
 
 class MainActivity : AppCompatActivity() {
+
+    companion object {
+        /** Cosine similarity needed to call two faces the same person. Shown on screen for tuning. */
+        private const val MATCH_THRESHOLD = 0.60f
+        private const val MIN_FACE_PX = 80
+        private const val ENROLL_SAMPLES = 6
+        private const val GREET_COOLDOWN_MS = 20_000L
+    }
 
     private lateinit var previewView: PreviewView
     private lateinit var overlay: FaceOverlay
@@ -40,8 +55,20 @@ class MainActivity : AppCompatActivity() {
 
     private var speech: SpeechRecognizer? = null
     private var tts: TextToSpeech? = null
-    private var ttsReady = false
-    private var listening = false
+    @Volatile private var ttsReady = false
+    @Volatile private var listening = false
+
+    // Face recognition state
+    private lateinit var store: FaceStore
+    private var embedder: FaceEmbedder? = null
+    @Volatile private var pendingName: String? = null
+    private val enrollSamples: MutableList<FloatArray> =
+        Collections.synchronizedList(mutableListOf())
+    private var lastEmbedAt = 0L
+    private var lastLabel: String? = null
+    private var candidate: String? = null
+    private var candidateCount = 0
+    private val lastGreetAt = mutableMapOf<String, Long>()
 
     private val detector by lazy {
         FaceDetection.getClient(
@@ -80,18 +107,43 @@ class MainActivity : AppCompatActivity() {
         micButton = findViewById(R.id.micButton)
         cameraExecutor = Executors.newSingleThreadExecutor()
 
+        store = FaceStore(this)
+        embedder = try {
+            FaceEmbedder(this)
+        } catch (e: Throwable) {
+            null
+        }
+        showKnownNames()
+        if (embedder == null) {
+            nameText.text = "Face model missing in this build. Recognition is off."
+        }
+
         tts = TextToSpeech(this) { status ->
             if (status == TextToSpeech.SUCCESS) {
                 val result = tts?.setLanguage(Locale.getDefault())
-                ttsReady = result != TextToSpeech.LANG_MISSING_DATA &&
-                    result != TextToSpeech.LANG_NOT_SUPPORTED
-                if (!ttsReady) tts?.setLanguage(Locale.US).also { ttsReady = true }
+                if (result == TextToSpeech.LANG_MISSING_DATA ||
+                    result == TextToSpeech.LANG_NOT_SUPPORTED
+                ) {
+                    tts?.setLanguage(Locale.US)
+                }
+                ttsReady = true
             }
         }
 
         findViewById<Button>(R.id.flipButton).setOnClickListener {
             useFrontCamera = !useFrontCamera
             startCamera()
+        }
+
+        findViewById<Button>(R.id.forgetButton).setOnClickListener {
+            store.clear()
+            pendingName = null
+            enrollSamples.clear()
+            lastGreetAt.clear()
+            candidate = null
+            candidateCount = 0
+            lastLabel = null
+            nameText.text = "Forgot all saved faces and names."
         }
 
         micButton.setOnClickListener {
@@ -115,7 +167,16 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ---------- Speech: listen for a name, then say it back ----------
+    private fun showKnownNames() {
+        val names = store.names()
+        nameText.text = if (names.isEmpty()) {
+            "Tap the mic and say your name"
+        } else {
+            "I know: ${names.joinToString(", ")}"
+        }
+    }
+
+    // ---------- Speech: listen for a name, then learn the face ----------
 
     private fun startListening() {
         if (!SpeechRecognizer.isRecognitionAvailable(this)) {
@@ -152,9 +213,7 @@ class MainActivity : AppCompatActivity() {
                         nameText.text = "I didn't catch that. Try again."
                         return
                     }
-                    val name = extractName(heard)
-                    nameText.text = "Hello, $name!"
-                    speak("Hello $name. Nice to meet you.")
+                    startEnrolling(extractName(heard))
                 }
 
                 override fun onError(error: Int) {
@@ -191,6 +250,19 @@ class MainActivity : AppCompatActivity() {
         micButton.text = if (value) "Stop" else "Say your name"
     }
 
+    /** Name heard -> now capture a few frames of the face and save them under that name. */
+    private fun startEnrolling(name: String) {
+        if (embedder == null) {
+            nameText.text = "Hello, $name! (Face model missing, so I can't remember your face.)"
+            speak("Hello $name.")
+            return
+        }
+        enrollSamples.clear()
+        pendingName = name
+        nameText.text = "Hello, $name! Look at the camera and hold still..."
+        speak("Hello $name. Look at the camera and hold still, so I can remember you.")
+    }
+
     /** "my name is Zen" -> "Zen" */
     private fun extractName(heard: String): String {
         val cleaned = heard.trim()
@@ -210,13 +282,15 @@ class MainActivity : AppCompatActivity() {
 
     private fun speak(text: String) {
         if (ttsReady) {
-            tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "name")
+            tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "speak")
         } else {
-            Toast.makeText(this, "Text-to-speech isn't ready yet", Toast.LENGTH_SHORT).show()
+            runOnUiThread {
+                Toast.makeText(this, "Text-to-speech isn't ready yet", Toast.LENGTH_SHORT).show()
+            }
         }
     }
 
-    // ---------- Camera + face detection ----------
+    // ---------- Camera + face detection + recognition ----------
 
     private fun startCamera() {
         val providerFuture = ProcessCameraProvider.getInstance(this)
@@ -260,8 +334,25 @@ class MainActivity : AppCompatActivity() {
 
         val input = InputImage.fromMediaImage(media, rotation)
         detector.process(input)
-            .addOnSuccessListener { faces ->
-                overlay.update(faces.map { it.boundingBox }, imgW, imgH, useFrontCamera)
+            .addOnSuccessListener(cameraExecutor) { faces ->
+                val largest = faces.maxByOrNull { it.boundingBox.width() }
+                var label: String? = null
+                if (largest != null) {
+                    label = try {
+                        processFace(proxy, largest.boundingBox)
+                    } catch (e: Exception) {
+                        null
+                    }
+                } else {
+                    candidate = null
+                    candidateCount = 0
+                    lastLabel = null
+                }
+                overlay.update(
+                    faces.map { it.boundingBox },
+                    imgW, imgH, useFrontCamera,
+                    faces.indexOf(largest), label
+                )
                 runOnUiThread {
                     statusText.text = when (faces.size) {
                         0 -> "No face detected"
@@ -270,7 +361,85 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             }
-            .addOnCompleteListener { proxy.close() }
+            .addOnCompleteListener(cameraExecutor) { proxy.close() }
+    }
+
+    /** Runs on the camera thread. Returns the label to draw above the face. */
+    private fun processFace(proxy: ImageProxy, box: Rect): String? {
+        val model = embedder ?: return null
+        if (box.width() < MIN_FACE_PX) return "Come closer"
+
+        val now = SystemClock.elapsedRealtime()
+        val enrolling = pendingName
+        val interval = if (enrolling != null) 250L else 400L
+        if (now - lastEmbedAt < interval) return lastLabel
+        lastEmbedAt = now
+
+        val crop = cropFace(proxy, box) ?: return lastLabel
+        val vector = model.embed(crop)
+
+        // Learning a new face
+        if (enrolling != null) {
+            enrollSamples.add(vector)
+            if (enrollSamples.size >= ENROLL_SAMPLES) {
+                val samples = synchronized(enrollSamples) { enrollSamples.toList() }
+                samples.forEach { store.add(enrolling, it) }
+                enrollSamples.clear()
+                pendingName = null
+                lastGreetAt[enrolling] = now
+                runOnUiThread { nameText.text = "Saved! I'll remember you, $enrolling." }
+                speak("Got it. I will remember you, $enrolling.")
+                lastLabel = enrolling
+                return lastLabel
+            }
+            lastLabel = "Learning ${enrollSamples.size}/$ENROLL_SAMPLES"
+            return lastLabel
+        }
+
+        // Recognising a known face
+        if (store.isEmpty()) {
+            lastLabel = null
+            return null
+        }
+        val match = store.match(vector, MATCH_THRESHOLD)
+        val score = String.format(Locale.US, "%.2f", match.score)
+        val name = match.name
+        if (name != null) {
+            if (name == candidate) candidateCount++ else {
+                candidate = name
+                candidateCount = 1
+            }
+            if (candidateCount >= 2) greetIfDue(name, now)
+            lastLabel = "$name ($score)"
+        } else {
+            candidate = null
+            candidateCount = 0
+            lastLabel = "Unknown ($score)"
+        }
+        return lastLabel
+    }
+
+    private fun greetIfDue(name: String, now: Long) {
+        if (listening) return
+        val last = lastGreetAt[name]
+        if (last != null && now - last < GREET_COOLDOWN_MS) return
+        lastGreetAt[name] = now
+        runOnUiThread { nameText.text = "Hi, $name!" }
+        speak("Hi $name")
+    }
+
+    /** Upright square crop around the face, ready for the model. */
+    private fun cropFace(proxy: ImageProxy, box: Rect): Bitmap? {
+        val raw = proxy.toBitmap()
+        val matrix = Matrix().apply { postRotate(proxy.imageInfo.rotationDegrees.toFloat()) }
+        val upright = Bitmap.createBitmap(raw, 0, 0, raw.width, raw.height, matrix, true)
+
+        val side = (max(box.width(), box.height()) * 1.15f).toInt()
+            .coerceAtMost(min(upright.width, upright.height))
+        if (side <= 0) return null
+        val left = (box.centerX() - side / 2).coerceIn(0, upright.width - side)
+        val top = (box.centerY() - side / 2).coerceIn(0, upright.height - side)
+        return Bitmap.createBitmap(upright, left, top, side, side)
     }
 
     override fun onDestroy() {
@@ -279,5 +448,6 @@ class MainActivity : AppCompatActivity() {
         tts?.shutdown()
         cameraExecutor.shutdown()
         detector.close()
+        embedder?.close()
     }
 }

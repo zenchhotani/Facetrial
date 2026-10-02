@@ -11,8 +11,8 @@ android {
         applicationId = "com.zen.facetrial"
         minSdk = 24
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1"
+        versionCode = 3
+        versionName = "0.3"
     }
 
     buildTypes {
@@ -42,4 +42,7 @@ dependencies {
 
     // ML Kit face detection, model bundled in the app (works offline)
     implementation("com.google.mlkit:face-detection:16.1.6")
+
+    // TensorFlow Lite runs the face-recognition model on the phone
+    implementation("org.tensorflow:tensorflow-lite:2.14.0")
 }

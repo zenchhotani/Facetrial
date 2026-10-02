@@ -30,7 +30,6 @@
         android:layout_height="wrap_content"
         android:layout_gravity="bottom"
         android:background="#99000000"
-        android:gravity="center_horizontal"
         android:orientation="vertical"
         android:padding="16dp">
 
@@ -44,23 +43,39 @@
             android:textSize="22sp" />
 
         <LinearLayout
-            android:layout_width="wrap_content"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="12dp"
             android:orientation="horizontal">
 
             <Button
                 android:id="@+id/micButton"
-                android:layout_width="wrap_content"
+                android:layout_width="0dp"
                 android:layout_height="wrap_content"
-                android:text="Say your name" />
+                android:layout_weight="1"
+                android:text="Say your name"
+                android:textAllCaps="false"
+                android:textSize="13sp" />
 
             <Button
                 android:id="@+id/flipButton"
-                android:layout_width="wrap_content"
+                android:layout_width="0dp"
                 android:layout_height="wrap_content"
-                android:layout_marginStart="12dp"
-                android:text="Flip camera" />
+                android:layout_marginStart="8dp"
+                android:layout_weight="1"
+                android:text="Flip camera"
+                android:textAllCaps="false"
+                android:textSize="13sp" />
+
+            <Button
+                android:id="@+id/forgetButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:layout_weight="1"
+                android:text="Forget all"
+                android:textAllCaps="false"
+                android:textSize="13sp" />
         </LinearLayout>
     </LinearLayout>
 
